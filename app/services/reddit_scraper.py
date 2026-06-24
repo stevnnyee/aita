@@ -3,8 +3,9 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Optional
+from typing import Any, Optional
 
+import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -12,16 +13,17 @@ from app.config import Settings, get_settings
 from app.models import UsedPost
 from app.utils.logging import get_logger
 
-if TYPE_CHECKING:
-    import praw
-    from praw.models import Submission
-
 logger = get_logger(__name__)
 
 REMOVED_MARKERS = {"[removed]", "[deleted]"}
 MIN_BODY_CHARS = 50
 MIN_TITLE_ONLY_CHARS = 100
 FETCH_LIMIT = 50
+REQUEST_TIMEOUT = 30.0
+
+# Reddit's public JSON listing — no API key required, just a descriptive
+# User-Agent. Read-only and rate-limited, which is plenty for a twice-daily run.
+LISTING_URL = "https://www.reddit.com/r/{subreddit}/top.json"
 
 
 @dataclass(frozen=True)
@@ -35,33 +37,39 @@ class RedditPost:
     created_utc: float
 
 
-def _reddit_client(settings: Settings) -> "praw.Reddit":
-    import praw
-
-    return praw.Reddit(
-        client_id=settings.reddit_client_id,
-        client_secret=settings.reddit_client_secret,
-        user_agent=settings.reddit_user_agent,
-    )
-
-
 def _used_reddit_ids(db: Session) -> set[str]:
     return set(db.scalars(select(UsedPost.reddit_id)).all())
 
 
-def _submission_url(submission: Submission) -> str:
-    return f"https://www.reddit.com{submission.permalink}"
+def _fetch_listing(settings: Settings, limit: int) -> list[dict[str, Any]]:
+    """Fetch the subreddit's top-of-day posts as a list of post data dicts."""
+    url = LISTING_URL.format(subreddit=settings.subreddit_name)
+    headers = {"User-Agent": settings.reddit_user_agent}
+    params = {"t": "day", "limit": limit}
+
+    response = httpx.get(url, headers=headers, params=params, timeout=REQUEST_TIMEOUT)
+    response.raise_for_status()
+    payload = response.json()
+
+    children = payload.get("data", {}).get("children", [])
+    return [
+        child.get("data", {})
+        for child in children
+        if child.get("kind") == "t3" and isinstance(child.get("data"), dict)
+    ]
 
 
-def _author_name(submission: Submission) -> str:
-    if submission.author is None:
-        return "[deleted]"
-    return str(submission.author.name)
+def _submission_url(post: dict[str, Any]) -> str:
+    return f"https://www.reddit.com{post.get('permalink', '')}"
 
 
-def _extract_body(submission: Submission) -> Optional[str]:
-    title = (submission.title or "").strip()
-    selftext = (submission.selftext or "").strip()
+def _author_name(post: dict[str, Any]) -> str:
+    return str(post.get("author") or "[deleted]")
+
+
+def _extract_body(post: dict[str, Any]) -> Optional[str]:
+    title = (post.get("title") or "").strip()
+    selftext = (post.get("selftext") or "").strip()
 
     if selftext.lower() in REMOVED_MARKERS:
         return None
@@ -79,44 +87,47 @@ def _extract_body(submission: Submission) -> Optional[str]:
 
 
 def _is_eligible_submission(
-    submission: Submission,
+    post: dict[str, Any],
     *,
     min_upvotes: int,
     cutoff_utc: float,
     used_ids: set[str],
 ) -> bool:
-    if submission.id in used_ids:
+    if post.get("id") in used_ids:
         return False
 
-    if submission.stickied:
+    if post.get("stickied"):
         return False
 
-    if submission.score < min_upvotes:
+    if post.get("over_18"):
         return False
 
-    if submission.created_utc < cutoff_utc:
+    if int(post.get("score", 0)) < min_upvotes:
         return False
 
-    body = _extract_body(submission)
+    if float(post.get("created_utc", 0.0)) < cutoff_utc:
+        return False
+
+    body = _extract_body(post)
     if body is None or len(body) < MIN_BODY_CHARS:
         return False
 
     return True
 
 
-def _to_reddit_post(submission: Submission) -> RedditPost:
-    body = _extract_body(submission)
+def _to_reddit_post(post: dict[str, Any]) -> RedditPost:
+    body = _extract_body(post)
     if body is None:
-        raise ValueError(f"Submission {submission.id} has no usable body")
+        raise ValueError(f"Submission {post.get('id')} has no usable body")
 
     return RedditPost(
-        id=submission.id,
-        title=(submission.title or "").strip(),
+        id=str(post["id"]),
+        title=(post.get("title") or "").strip(),
         body=body,
-        score=submission.score,
-        url=_submission_url(submission),
-        author=_author_name(submission),
-        created_utc=float(submission.created_utc),
+        score=int(post.get("score", 0)),
+        url=_submission_url(post),
+        author=_author_name(post),
+        created_utc=float(post.get("created_utc", 0.0)),
     )
 
 
@@ -128,25 +139,24 @@ def fetch_eligible_posts(
 ) -> list[RedditPost]:
     """Return all eligible top posts, highest score first."""
     settings = settings or get_settings()
-    reddit = _reddit_client(settings)
-    subreddit = reddit.subreddit(settings.subreddit_name)
 
     cutoff_utc = (datetime.now(timezone.utc) - timedelta(hours=24)).timestamp()
     used_ids = _used_reddit_ids(db)
 
+    posts = _fetch_listing(settings, limit)
     eligible: list[RedditPost] = []
     examined = 0
 
-    for submission in subreddit.top(time_filter="day", limit=limit):
+    for post in posts:
         examined += 1
         if not _is_eligible_submission(
-            submission,
+            post,
             min_upvotes=settings.min_upvotes,
             cutoff_utc=cutoff_utc,
             used_ids=used_ids,
         ):
             continue
-        eligible.append(_to_reddit_post(submission))
+        eligible.append(_to_reddit_post(post))
 
     logger.info(
         "Reddit scan complete: examined=%d eligible=%d subreddit=r/%s min_upvotes=%d",
@@ -168,20 +178,6 @@ def fetch_eligible_post(
     if not posts:
         return None
     return posts[0]
-
-
-def _validate_reddit_config(settings: Settings) -> None:
-    missing = [
-        name
-        for name in ("reddit_client_id", "reddit_client_secret", "reddit_user_agent")
-        if not getattr(settings, name)
-    ]
-    if missing:
-        raise ValueError(
-            "Missing Reddit configuration: "
-            + ", ".join(sorted(missing))
-            + ". Set these via environment variables or the .env file."
-        )
 
 
 def _format_post(post: RedditPost) -> str:
@@ -210,7 +206,6 @@ def main() -> None:
     args = parser.parse_args()
 
     settings = get_settings()
-    _validate_reddit_config(settings)
 
     from app.database import get_db_session, init_db
 

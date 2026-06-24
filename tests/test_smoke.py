@@ -24,12 +24,12 @@ def test_ensure_dirs_creates_all_dirs(tmp_path, monkeypatch):
 
 
 def test_validate_required_reports_missing():
-    s = Settings(reddit_client_id="", openai_api_key="x")
+    s = Settings(elevenlabs_api_key="", openai_api_key="x")
     try:
         s.validate_required()
         assert False, "expected ValueError"
     except ValueError as e:
-        assert "reddit_client_id" in str(e)
+        assert "elevenlabs_api_key" in str(e)
         assert "openai_api_key" not in str(e)  # this one is set
 
 

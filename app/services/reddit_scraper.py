@@ -41,13 +41,30 @@ def _used_reddit_ids(db: Session) -> set[str]:
     return set(db.scalars(select(UsedPost.reddit_id)).all())
 
 
+_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/javascript, */*; q=0.01",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+
 def _fetch_listing(settings: Settings, limit: int) -> list[dict[str, Any]]:
     """Fetch the subreddit's top-of-day posts as a list of post data dicts."""
     url = LISTING_URL.format(subreddit=settings.subreddit_name)
-    headers = {"User-Agent": settings.reddit_user_agent}
-    params = {"t": "day", "limit": limit}
+    # A browser-like User-Agent helps avoid Reddit's bot block on the public
+    # JSON endpoint. follow_redirects handles the occasional www->old redirect.
+    params = {"t": "day", "limit": limit, "raw_json": 1}
 
-    response = httpx.get(url, headers=headers, params=params, timeout=REQUEST_TIMEOUT)
+    response = httpx.get(
+        url,
+        headers=_BROWSER_HEADERS,
+        params=params,
+        timeout=REQUEST_TIMEOUT,
+        follow_redirects=True,
+    )
     response.raise_for_status()
     payload = response.json()
 

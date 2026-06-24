@@ -143,7 +143,7 @@ def test_fetch_listing_parses_children(monkeypatch):
     }
     captured = {}
 
-    def fake_get(url, headers, params, timeout):
+    def fake_get(url, headers, params, timeout, **kwargs):
         captured.update(url=url, headers=headers, params=params)
         return FakeResponse(payload)
 

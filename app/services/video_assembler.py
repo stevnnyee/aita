@@ -29,7 +29,7 @@ class AssembleResult:
     video_path: Path
     duration_seconds: float
     background_path: Path
-    music_path: Path
+    music_path: Optional[Path]  # None when the video has no background music
 
 
 def target_duration(voiceover_duration: float) -> float:
@@ -39,6 +39,16 @@ def target_duration(voiceover_duration: float) -> float:
     )
 
 
+def _list_assets(directory: Path, extensions: set[str]) -> list[Path]:
+    if not directory.is_dir():
+        return []
+    return [
+        path
+        for path in directory.iterdir()
+        if path.is_file() and path.suffix.lower() in extensions
+    ]
+
+
 def _pick_random_asset(directory: Path, extensions: set[str], label: str) -> Path:
     if not directory.is_dir():
         raise FileNotFoundError(
@@ -46,11 +56,7 @@ def _pick_random_asset(directory: Path, extensions: set[str], label: str) -> Pat
             f"Create it and add media files."
         )
 
-    candidates = [
-        path
-        for path in directory.iterdir()
-        if path.is_file() and path.suffix.lower() in extensions
-    ]
+    candidates = _list_assets(directory, extensions)
     if not candidates:
         raise FileNotFoundError(
             f"No {label} files found in {directory}. "
@@ -58,6 +64,19 @@ def _pick_random_asset(directory: Path, extensions: set[str], label: str) -> Pat
         )
 
     return random.choice(candidates)
+
+
+def _maybe_pick_music(settings: Settings) -> Optional[Path]:
+    """Pick a music track with probability settings.music_chance, else None.
+
+    Returns None when music is disabled (chance <= 0), when the dice say "no
+    music" for this video, or when there are simply no music files available —
+    so an empty music/ folder is fine and just means no background music.
+    """
+    if settings.music_chance <= 0 or random.random() >= settings.music_chance:
+        return None
+    candidates = _list_assets(settings.assets_music_dir, MUSIC_EXTENSIONS)
+    return random.choice(candidates) if candidates else None
 
 
 def _voiceover_from_output(reddit_id: str, settings: Settings) -> VoiceoverResult:
@@ -107,39 +126,37 @@ def assemble(
     background_path = background or _pick_random_asset(
         settings.assets_bg_dir, BACKGROUND_EXTENSIONS, "background"
     )
-    music_path = music or _pick_random_asset(
-        settings.assets_music_dir, MUSIC_EXTENSIONS, "music"
-    )
+    # Explicit music wins; otherwise maybe pick one (some videos get none).
+    music_path = music if music is not None else _maybe_pick_music(settings)
 
     duration = target_duration(voiceover.duration_seconds)
     subtitle_path = escape_subtitles_path(captions_path)
 
-    filter_complex = (
+    video_filter = (
         f"[0:v]scale={VIDEO_WIDTH}:{VIDEO_HEIGHT}:force_original_aspect_ratio=increase,"
         f"crop={VIDEO_WIDTH}:{VIDEO_HEIGHT},setsar=1,"
-        f"subtitles='{subtitle_path}'[vout];"
-        f"[1:a]asetpts=PTS-STARTPTS[voice];"
-        f"[2:a]volume={MUSIC_VOLUME},asetpts=PTS-STARTPTS[music];"
-        f"[voice][music]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[aout]"
+        f"subtitles='{subtitle_path}'[vout]"
     )
 
-    command = [
-        "ffmpeg",
-        "-y",
-        "-stream_loop",
-        "-1",
-        "-i",
-        str(background_path),
-        "-i",
-        str(voiceover.audio_path),
-        "-stream_loop",
-        "-1",
-        "-i",
-        str(music_path),
+    command = ["ffmpeg", "-y", "-stream_loop", "-1", "-i", str(background_path),
+               "-i", str(voiceover.audio_path)]
+
+    if music_path is not None:
+        command += ["-stream_loop", "-1", "-i", str(music_path)]
+        audio_filter = (
+            f"[1:a]asetpts=PTS-STARTPTS[voice];"
+            f"[2:a]volume={MUSIC_VOLUME},asetpts=PTS-STARTPTS[music];"
+            f"[voice][music]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[aout]"
+        )
+    else:
+        # No music: the voiceover is the only audio track.
+        audio_filter = "[1:a]asetpts=PTS-STARTPTS[aout]"
+
+    command += [
         "-t",
         f"{duration:.3f}",
         "-filter_complex",
-        filter_complex,
+        f"{video_filter};{audio_filter}",
         "-map",
         "[vout]",
         "-map",
@@ -166,7 +183,7 @@ def assemble(
         reddit_id,
         duration,
         background_path.name,
-        music_path.name,
+        music_path.name if music_path else "(none)",
     )
 
     try:
@@ -224,7 +241,7 @@ def main() -> None:
     print(f"Video:      {result.video_path}")
     print(f"Duration:   {result.duration_seconds:.1f}s")
     print(f"Background: {result.background_path}")
-    print(f"Music:      {result.music_path}")
+    print(f"Music:      {result.music_path or '(none)'}")
 
 
 if __name__ == "__main__":

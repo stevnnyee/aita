@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     subreddit_name: str = "AmItheAsshole"
     min_upvotes: int = 500
 
+    # Fraction of videos that get background music (0.0 = never, 1.0 = always).
+    # The rest play the voiceover over silent background footage.
+    music_chance: float = 0.5
+
     # OpenAI
     openai_api_key: str = ""
 

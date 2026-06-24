@@ -124,6 +124,7 @@ def test_assemble_picks_random_assets_when_not_given(tmp_path, monkeypatch):
         output_dir=tmp_path / "output",
         assets_bg_dir=tmp_path / "assets_bg",
         assets_music_dir=tmp_path / "assets_music",
+        music_chance=1.0,  # force music so the assertion is deterministic
     )
     settings.assets_bg_dir.mkdir(parents=True, exist_ok=True)
     settings.assets_music_dir.mkdir(parents=True, exist_ok=True)
@@ -134,3 +135,54 @@ def test_assemble_picks_random_assets_when_not_given(tmp_path, monkeypatch):
     result = va.assemble("r1", vo, settings=settings)
     assert result.background_path.name == "x.mp4"
     assert result.music_path.name == "y.mp3"
+
+
+# --- _maybe_pick_music -------------------------------------------------------
+
+def test_maybe_pick_music_disabled_returns_none(tmp_path):
+    s = Settings(assets_music_dir=tmp_path, music_chance=0.0)
+    (tmp_path / "a.mp3").write_bytes(b"m")
+    assert va._maybe_pick_music(s) is None
+
+
+def test_maybe_pick_music_always_picks_when_chance_one(tmp_path):
+    s = Settings(assets_music_dir=tmp_path, music_chance=1.0)
+    (tmp_path / "a.mp3").write_bytes(b"m")
+    assert va._maybe_pick_music(s).name == "a.mp3"
+
+
+def test_maybe_pick_music_none_when_no_files(tmp_path):
+    s = Settings(assets_music_dir=tmp_path, music_chance=1.0)  # wants music, but none exist
+    assert va._maybe_pick_music(s) is None
+
+
+def test_maybe_pick_music_respects_probability(tmp_path, monkeypatch):
+    s = Settings(assets_music_dir=tmp_path, music_chance=0.5)
+    (tmp_path / "a.mp3").write_bytes(b"m")
+    monkeypatch.setattr(va.random, "random", lambda: 0.9)   # >= 0.5 -> skip
+    assert va._maybe_pick_music(s) is None
+    monkeypatch.setattr(va.random, "random", lambda: 0.1)   # < 0.5 -> pick
+    assert va._maybe_pick_music(s) is not None
+
+
+# --- assemble without music --------------------------------------------------
+
+def test_assemble_without_music_omits_mix(tmp_path, monkeypatch):
+    settings, vo, bg, _music, out = _setup(tmp_path)
+    settings = Settings(output_dir=tmp_path / "output", music_chance=0.0)
+    captured = {}
+    monkeypatch.setattr(
+        va, "run",
+        lambda command, *, description="": captured.update(command=command),
+    )
+
+    result = va.assemble("r1", vo, settings=settings, background=bg)  # music auto -> none
+
+    assert result.music_path is None
+    cmd = captured["command"]
+    joined = " ".join(cmd)
+    assert "amix" not in joined          # no mixing
+    assert "volume=" not in joined        # no music volume filter
+    assert "[1:a]asetpts=PTS-STARTPTS[aout]" in joined  # voice is the only audio
+    assert cmd.count("-i") == 2           # only background + voiceover inputs
+    assert cmd.count("-map") == 2         # video + audio still mapped

@@ -51,9 +51,12 @@ class Settings(BaseSettings):
     ready_dir: Path = Path("output/ready")
     log_dir: Path = Path("logs")
 
-    # Secrets that the pipeline cannot run without. (Reddit needs no key — the
-    # scraper uses Reddit's public JSON endpoint with just a User-Agent.)
+    # Secrets that the pipeline cannot run without. Reddit needs API credentials
+    # because the scraper authenticates via OAuth (the public JSON endpoint is
+    # blocked from datacenter IPs like EC2).
     _REQUIRED_SECRETS: ClassVar[tuple[str, ...]] = (
+        "reddit_client_id",
+        "reddit_client_secret",
         "openai_api_key",
         "elevenlabs_api_key",
         "elevenlabs_voice_id",

@@ -13,7 +13,7 @@ logger = get_logger(__name__)
 
 DEFAULT_STUCK_MINUTES = 60
 
-
+#oh my gad
 def reset_failed_uploads(db: Session) -> int:
     """Delete rows whose upload raised an error so those posts can be retried.
 

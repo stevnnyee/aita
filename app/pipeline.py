@@ -201,6 +201,8 @@ def main() -> None:
         missing = [
             name
             for name in (
+                "reddit_client_id",
+                "reddit_client_secret",
                 "openai_api_key",
                 "elevenlabs_api_key",
                 "elevenlabs_voice_id",

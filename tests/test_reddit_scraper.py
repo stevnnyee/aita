@@ -118,42 +118,63 @@ def test_to_reddit_post_raises_without_body():
         rs._to_reddit_post(post(title="short", selftext=""))
 
 
-# --- _fetch_listing (JSON parsing) ------------------------------------------
+# --- _submission_to_dict / _fetch_listing (PRAW) ----------------------------
 
-class FakeResponse:
-    def __init__(self, payload):
-        self._payload = payload
-
-    def raise_for_status(self):
-        pass
-
-    def json(self):
-        return self._payload
+class FakeAuthor:
+    def __init__(self, name):
+        self.name = name
 
 
-def test_fetch_listing_parses_children(monkeypatch):
-    payload = {
-        "data": {
-            "children": [
-                {"kind": "t3", "data": {"id": "a", "title": "A"}},
-                {"kind": "t3", "data": {"id": "b", "title": "B"}},
-                {"kind": "t1", "data": {"id": "c"}},  # not a post -> skipped
-            ]
-        }
-    }
-    captured = {}
+class FakeSubmission:
+    def __init__(self, **kw):
+        self.id = kw.get("id", "x")
+        self.title = kw.get("title", "T")
+        self.selftext = kw.get("selftext", "body")
+        self.score = kw.get("score", 100)
+        self.stickied = kw.get("stickied", False)
+        self.over_18 = kw.get("over_18", False)
+        self.created_utc = kw.get("created_utc", 0.0)
+        self.author = kw.get("author", FakeAuthor("u"))
+        self.permalink = kw.get("permalink", "/r/x/1/")
 
-    def fake_get(url, headers, params, timeout, **kwargs):
-        captured.update(url=url, headers=headers, params=params)
-        return FakeResponse(payload)
 
-    monkeypatch.setattr(rs.httpx, "get", fake_get)
+class FakeSubreddit:
+    def __init__(self, subs):
+        self._subs = subs
+        self.called_with = None
+
+    def top(self, time_filter="day", limit=50):
+        self.called_with = (time_filter, limit)
+        return list(self._subs)[:limit]
+
+
+class FakeReddit:
+    def __init__(self, subs):
+        self._sr = FakeSubreddit(subs)
+
+    def subreddit(self, name):
+        return self._sr
+
+
+def test_submission_to_dict_handles_deleted_author():
+    d = rs._submission_to_dict(FakeSubmission(id="a", author=None))
+    assert d["author"] is None
+    d2 = rs._submission_to_dict(FakeSubmission(id="b", author=FakeAuthor("alice")))
+    assert d2["author"] == "alice"
+
+
+def test_fetch_listing_maps_submissions(monkeypatch):
+    subs = [FakeSubmission(id="a", title="A"), FakeSubmission(id="b", title="B")]
+    monkeypatch.setattr(rs, "_reddit_client", lambda s: FakeReddit(subs))
 
     out = rs._fetch_listing(Settings(subreddit_name="AmItheAsshole"), 50)
     assert [p["id"] for p in out] == ["a", "b"]
-    assert "AmItheAsshole" in captured["url"]
-    assert captured["headers"]["User-Agent"]  # UA is sent
-    assert captured["params"]["t"] == "day"
+    assert out[0]["title"] == "A"
+
+
+def test_reddit_client_requires_credentials():
+    with pytest.raises(ValueError, match="Reddit API credentials"):
+        rs._reddit_client(Settings(reddit_client_id="", reddit_client_secret=""))
 
 
 # --- fetch_eligible_posts (filtering + DB dedupe) ---------------------------
